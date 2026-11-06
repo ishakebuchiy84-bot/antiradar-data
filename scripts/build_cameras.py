@@ -212,7 +212,7 @@ def dedupe(cams):
             for dy in (-1, 0, 1):
                 for k in cell.get((key[0] + dx, key[1] + dy), []):
                     dm = dist_m(k, c)
-                    if (k["type"] == c["type"] and dm <= DEDUP_METERS) or dm <= 8:
+                    if k["type"] == c["type"] and dm <= DEDUP_METERS:
                         dup = k
         if dup:
             dup["limit"] = dup["limit"] or c.get("limit")
@@ -225,7 +225,9 @@ def dedupe(cams):
 
 
 def stable_id(c):
-    return f"{c['type'][0]}{int(round(c['lat'] * 1e5))}_{int(round(c['lon'] * 1e5))}"
+    # Keep existing IDs except where first-letter prefixes collide.
+    prefix = {"seatbelt": "sb", "average": "av"}.get(c["type"], c["type"][0])
+    return f"{prefix}{int(round(c['lat'] * 1e5))}_{int(round(c['lon'] * 1e5))}"
 
 
 def main():
@@ -238,14 +240,16 @@ def main():
     cams.sort(key=lambda c: c["id"])
 
     old_ids, version = set(), 0
+    old_cameras = []
     if OUT.exists():
         old = json.loads(OUT.read_text("utf-8"))
+        old_cameras = old.get("cameras", [])
         old_ids = {c["id"] for c in old.get("cameras", [])}
         version = old.get("version", 0)
 
     new_ids = {c["id"] for c in cams}
     added, removed = len(new_ids - old_ids), len(old_ids - new_ids)
-    if old_ids and not added and not removed:
+    if old_ids and old_cameras == cams:
         print("Изменений нет.")
         return
     if old_ids and len(new_ids) < len(old_ids) * 0.7:
