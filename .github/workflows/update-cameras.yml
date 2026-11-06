@@ -7,11 +7,15 @@ on:
     paths: ["data/manual.json", "scripts/build_cameras.py"]
 permissions:
   contents: write
+concurrency:
+  group: update-cameras
+  cancel-in-progress: false
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with: { ref: main }
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
       - run: sudo apt-get update && sudo apt-get install -y poppler-utils
@@ -20,5 +24,6 @@ jobs:
         run: |
           git config user.name "antiradar-bot"
           git config user.email "bot@users.noreply.github.com"
-          git add data/cameras.json data/changes.json data/official_sample.txt
+          git add data/cameras.json data/changes.json
+          if [ -f data/official_sample.txt ]; then git add data/official_sample.txt; fi
           git diff --cached --quiet || (git commit -m "Update cameras" && git push)
