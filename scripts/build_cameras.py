@@ -5,7 +5,7 @@
 data/manual.json (камеры, добавленные вручную: мобильные посты, треножники и т.д.).
 Результат: data/cameras.json и data/changes.json (сколько нового).
 """
-import json, math, sys, time, urllib.request, urllib.parse
+import json, math, re, subprocess, sys, time, urllib.request, urllib.parse
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -18,6 +18,9 @@ OVERPASS = ["https://overpass-api.de/api/interpreter",
             "https://overpass.kumi.systems/api/interpreter"]
 UZB_DB = "https://raw.githubusercontent.com/muminoff/uzbspeedcameradb/main/data/cameras.json"
 DEDUP_METERS = 25
+OFFICIAL_PDF = "https://api-portal.gov.uz/uploads/11/2025/07/15/5d27a667-c508-c1a7-04ad-cf53a8e1c4e7_media_.pdf"
+SAMPLE = ROOT / "data" / "official_sample.txt"
+COORD = re.compile(r"(\d{2}[.,]\d{3,})\s*[,;/\s]\s*(\d{2}[.,]\d{3,})")
 
 QUERY = """
 [out:json][timeout:180];
@@ -126,6 +129,55 @@ def from_uzbdb():
         return []
 
 
+def classify_text(low):
+    if re.search(r"средн\w* скорост", low):
+        return "average"
+    if re.search(r"светофор|красн", low):
+        return "redlight"
+    if re.search(r"ремн|телефон", low):
+        return "seatbelt"
+    if re.search(r"полос|автобус", low):
+        return "buslane"
+    if re.search(r"радар|скорост|tezlik|tezkor", low):
+        return "speed"
+    return "traffic"
+
+
+def from_official():
+    """Официальный список СБДД МВД (1831 точка). Берём только строки с координатами."""
+    try:
+        req = urllib.request.Request(OFFICIAL_PDF, headers={"User-Agent": "AntiRadar-by-Jovliev/1.0"})
+        data = urllib.request.urlopen(req, timeout=120).read()
+        pdf = ROOT / "data" / "official.pdf"
+        pdf.write_bytes(data)
+        txt = subprocess.run(["pdftotext", "-layout", str(pdf), "-"], capture_output=True, text=True, check=True).stdout
+        pdf.unlink(missing_ok=True)
+    except Exception as e:  # noqa
+        print(f"official PDF failed: {e}", file=sys.stderr)
+        return []
+    lines = [l for l in txt.splitlines() if l.strip()]
+    SAMPLE.write_text("\n".join(lines[:80]), "utf-8")
+    cams = []
+    for line in lines:
+        m = COORD.search(line)
+        if not m:
+            continue
+        a, b = float(m.group(1).replace(",", ".")), float(m.group(2).replace(",", "."))
+        if 37 <= a <= 46 and 55 <= b <= 74:
+            lat, lon = a, b
+        elif 37 <= b <= 46 and 55 <= a <= 74:
+            lat, lon = b, a
+        else:
+            continue
+        low = line.lower()
+        lim = re.search(r"(\d{2,3})\s*(?:км|km)", low)
+        cams.append({"lat": round(lat, 6), "lon": round(lon, 6), "type": classify_text(low),
+                     "limit": int(lim.group(1)) if lim else None, "bearing": [],
+                     "name": None, "src": "official"})
+    print(f"official PDF: {len(cams)} строк с координатами из {len(lines)}")
+    return cams
+
+
 def from_manual():
     if not MANUAL.exists():
         return []
@@ -149,7 +201,7 @@ def dist_m(a, b):
 def dedupe(cams):
     """Приоритет: manual > osm > uzbdb. Дубликат = тот же тип в радиусе 25 м.
     Дубль не выбрасываем вслепую: дополняем оригинал лимитом, направлением, названием."""
-    order = {"manual": 0, "osm": 1, "uzbdb": 2}
+    order = {"manual": 0, "official": 1, "osm": 2, "uzbdb": 3}
     cams = sorted(cams, key=lambda c: order.get(c["src"], 9))
     cell = {}
     kept = []
@@ -159,7 +211,8 @@ def dedupe(cams):
         for dx in (-1, 0, 1):
             for dy in (-1, 0, 1):
                 for k in cell.get((key[0] + dx, key[1] + dy), []):
-                    if k["type"] == c["type"] and dist_m(k, c) <= DEDUP_METERS:
+                    dm = dist_m(k, c)
+                    if (k["type"] == c["type"] and dm <= DEDUP_METERS) or dm <= 8:
                         dup = k
         if dup:
             dup["limit"] = dup["limit"] or c.get("limit")
@@ -176,7 +229,7 @@ def stable_id(c):
 
 
 def main():
-    cams = from_manual() + from_overpass() + from_uzbdb()
+    cams = from_manual() + from_official() + from_overpass() + from_uzbdb()
     if not cams:
         sys.exit("Нет данных ни из одного источника, базу не трогаю.")
     cams = dedupe(cams)
